@@ -12,10 +12,35 @@ declare(strict_types=1);
 define("CACHE_DURATION", 24 * 60 * 60);
 
 /**
- * Use writable temp storage on serverless platforms such as Vercel.
- * The deployment bundle is read-only, while sys_get_temp_dir() is writable.
+ * Resolve a writable base directory for cache files.
+ *
+ * Priority:
+ * 1) CACHE_DIR env var (explicit override)
+ * 2) /tmp on Vercel
+ * 3) sys_get_temp_dir() when writable
  */
-define("CACHE_DIR", rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . "github-readme-streak-stats-cache");
+function resolveCacheBaseDir(): string
+{
+    $envCacheDir = getenv("CACHE_DIR");
+    if (is_string($envCacheDir) && trim($envCacheDir) !== "") {
+        return rtrim($envCacheDir, DIRECTORY_SEPARATOR);
+    }
+
+    $isVercel = getenv("VERCEL") === "1" || isset($_SERVER["VERCEL"]) || getenv("VERCEL_URL") !== false;
+    if ($isVercel && is_dir("/tmp") && is_writable("/tmp")) {
+        return "/tmp";
+    }
+
+    $tmpDir = sys_get_temp_dir();
+    if (is_string($tmpDir) && $tmpDir !== "" && is_dir($tmpDir) && is_writable($tmpDir)) {
+        return rtrim($tmpDir, DIRECTORY_SEPARATOR);
+    }
+
+    // Last-resort fallback. If this is read-only, cache writes will be skipped gracefully.
+    return rtrim(__DIR__, DIRECTORY_SEPARATOR);
+}
+
+define("CACHE_DIR", resolveCacheBaseDir() . DIRECTORY_SEPARATOR . "github-readme-streak-stats-cache");
 
 /**
  * Generate a cache key for a user's request
@@ -59,7 +84,13 @@ function getCacheFilePath(string $key): string
 function ensureCacheDir(): bool
 {
     if (is_dir(CACHE_DIR)) {
-        return true;
+        return is_writable(CACHE_DIR);
+    }
+
+    $parentDir = dirname(CACHE_DIR);
+    if (!is_dir($parentDir) || !is_writable($parentDir)) {
+        error_log("Cache parent directory is not writable: " . $parentDir);
+        return false;
     }
 
     if (@mkdir(CACHE_DIR, 0755, true)) {
@@ -221,3 +252,4 @@ function clearUserCache(string $user): bool
 
     return true;
 }
+
