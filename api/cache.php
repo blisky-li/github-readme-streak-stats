@@ -10,7 +10,12 @@ declare(strict_types=1);
 
 // Default cache duration: 24 hours (in seconds)
 define("CACHE_DURATION", 24 * 60 * 60);
-define("CACHE_DIR", __DIR__ . "/../cache");
+
+/**
+ * Use writable temp storage on serverless platforms such as Vercel.
+ * The deployment bundle is read-only, while sys_get_temp_dir() is writable.
+ */
+define("CACHE_DIR", rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . "github-readme-streak-stats-cache");
 
 /**
  * Generate a cache key for a user's request
@@ -28,10 +33,10 @@ function getCacheKey(string $user, array $options = []): string
     try {
         $keyData = json_encode(["user" => $user, "options" => $options], JSON_THROW_ON_ERROR);
     } catch (JsonException $e) {
-        // Fallback to simple concatenation if JSON encoding fails
         error_log("Cache key JSON encoding failed: " . $e->getMessage());
         $keyData = $user . serialize($options);
     }
+
     return hash("sha256", $keyData);
 }
 
@@ -43,7 +48,7 @@ function getCacheKey(string $user, array $options = []): string
  */
 function getCacheFilePath(string $key): string
 {
-    return CACHE_DIR . "/" . $key . ".json";
+    return CACHE_DIR . DIRECTORY_SEPARATOR . $key . ".json";
 }
 
 /**
@@ -53,10 +58,16 @@ function getCacheFilePath(string $key): string
  */
 function ensureCacheDir(): bool
 {
-    if (!is_dir(CACHE_DIR)) {
-        return mkdir(CACHE_DIR, 0755, true);
+    if (is_dir(CACHE_DIR)) {
+        return true;
     }
-    return true;
+
+    if (@mkdir(CACHE_DIR, 0755, true)) {
+        return true;
+    }
+
+    // Handle race condition: another process may have created it after is_dir()
+    return is_dir(CACHE_DIR);
 }
 
 /**
@@ -72,33 +83,34 @@ function getCachedStats(string $user, array $options = [], int $maxAge = CACHE_D
     $key = getCacheKey($user, $options);
     $filePath = getCacheFilePath($key);
 
-    if (!file_exists($filePath)) {
+    if (!is_file($filePath)) {
         return null;
     }
 
-    $mtime = filemtime($filePath);
+    $mtime = @filemtime($filePath);
     if ($mtime === false) {
         return null;
     }
 
     $fileAge = time() - $mtime;
     if ($fileAge > $maxAge) {
-        unlink($filePath);
+        @unlink($filePath);
         return null;
     }
 
-    $handle = fopen($filePath, "r");
+    $handle = @fopen($filePath, "r");
     if ($handle === false) {
         return null;
     }
 
-    if (!flock($handle, LOCK_SH)) {
+    if (!@flock($handle, LOCK_SH)) {
         fclose($handle);
         return null;
     }
 
     $contents = stream_get_contents($handle);
-    flock($handle, LOCK_UN);
+
+    @flock($handle, LOCK_UN);
     fclose($handle);
 
     if ($contents === false || $contents === "") {
@@ -131,13 +143,14 @@ function setCachedStats(string $user, array $options, array $stats): bool
     $key = getCacheKey($user, $options);
     $filePath = getCacheFilePath($key);
 
-    $data = json_encode($stats);
-    if ($data === false) {
-        error_log("Failed to encode stats to JSON for user: " . $user);
+    try {
+        $data = json_encode($stats, JSON_THROW_ON_ERROR);
+    } catch (JsonException $e) {
+        error_log("Failed to encode stats to JSON for user {$user}: " . $e->getMessage());
         return false;
     }
 
-    $result = file_put_contents($filePath, $data, LOCK_EX);
+    $result = @file_put_contents($filePath, $data, LOCK_EX);
     if ($result === false) {
         error_log("Failed to write cache file: " . $filePath);
         return false;
@@ -159,20 +172,21 @@ function clearExpiredCache(int $maxAge = CACHE_DURATION): int
     }
 
     $deleted = 0;
-    $files = glob(CACHE_DIR . "/*.json");
+    $files = glob(CACHE_DIR . DIRECTORY_SEPARATOR . "*.json");
 
     if ($files === false) {
         return 0;
     }
 
     foreach ($files as $file) {
-        $mtime = filemtime($file);
+        $mtime = @filemtime($file);
         if ($mtime === false) {
             continue;
         }
+
         $fileAge = time() - $mtime;
         if ($fileAge > $maxAge) {
-            if (unlink($file)) {
+            if (@unlink($file)) {
                 $deleted++;
             }
         }
@@ -201,8 +215,8 @@ function clearUserCache(string $user): bool
     $key = getCacheKey($user, []);
     $filePath = getCacheFilePath($key);
 
-    if (file_exists($filePath)) {
-        return unlink($filePath);
+    if (is_file($filePath)) {
+        return @unlink($filePath);
     }
 
     return true;
